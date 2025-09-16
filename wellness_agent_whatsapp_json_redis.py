@@ -536,7 +536,7 @@ async def whatsapp_webhook(payload: Any, request: Request):
             item = {"date": datetime.utcnow().date().isoformat(), "kg": _kfloat(m.group(1))}
             u.setdefault("weights", []).insert(0, item)
             save_user(user_id, u)
-            reply = f"peso registrado: {item['kg']} kg".
+            reply = f"peso registrado: {item['kg']} kg"
 
     # ÁGUA
     if not reply:
