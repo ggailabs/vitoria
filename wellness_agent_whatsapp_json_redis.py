@@ -115,6 +115,38 @@ class EvoEnvelope(BaseModel):
     webhookUrl: Optional[str] = None
     executionMode: Optional[str] = None
 
+# Aceita payloads em formatos flexíveis (array de envelopes, envelope incompleto, ou body direto)
+# e converte para EvoEnvelope (Pydantic v2).
+def envelope_from_any(item: Dict[str, Any]) -> EvoEnvelope:
+    # Caso 1: envelope completo com body
+    if isinstance(item, dict) and item.get("body") and isinstance(item["body"], dict):
+        return EvoEnvelope.model_validate({
+            "headers": item.get("headers", {}),
+            "params": item.get("params", {}),
+            "query": item.get("query", {}),
+            "body": EvoBody.model_validate(item["body"]),
+            "webhookUrl": item.get("webhookUrl"),
+            "executionMode": item.get("executionMode"),
+        })
+    # Caso 2: body direto no topo (event + data)
+    if isinstance(item, dict) and "event" in item and "data" in item:
+        return EvoEnvelope.model_validate({
+            "headers": item.get("headers", {}),
+            "params": item.get("params", {}),
+            "query": item.get("query", {}),
+            "body": EvoBody.model_validate(item),
+        })
+    # Caso 3: só data no topo — fabricamos um body mínimo
+    if isinstance(item, dict) and "data" in item and isinstance(item["data"], dict):
+        body = {"event": item.get("event", "message.received"), "timestamp": item.get("timestamp"), "data": item["data"]}
+        return EvoEnvelope.model_validate({
+            "headers": item.get("headers", {}),
+            "params": item.get("params", {}),
+            "query": item.get("query", {}),
+            "body": EvoBody.model_validate(body),
+        })
+    raise ValueError("payload shape not recognized")
+
 # -------------------------
 # JSON DB helpers
 # -------------------------
@@ -169,7 +201,7 @@ _kfloat = lambda s: float(str(s).replace(",", "."))
 
 re_peso = re.compile(r"^\s*peso\s+(\d+[\.,]?\d*)", re.I)
 re_agua = re.compile(r"^\s*(agua|água)\s+(\d+[\.,]?\d*)", re.I)
-re_meal = re.compile(r"^\s*refe[ií]cao|refe[ií]ção", re.I)
+re_meal = re.compile(r"^\s*(?:refe[ií]cao|refe[ií]ção)", re.I)
 re_treino = re.compile(r"^\s*treino\s+(?P<tipo>\w+)\s+(?P<dur>\d+)\s*min(?:\s+(?P<sets>\d+)x(?P<reps>\d+))?", re.I)
 re_perfil = re.compile(r"perfil\s+altura\s+(?P<alt>\d{3})\s+sexo\s+(?P<sex>\w+)\s+objetivo\s+(?P<goal>\w+)\s+atividade\s+(?P<act>\w+)", re.I)
 
@@ -508,16 +540,27 @@ async def last_report(user_id: str):
 # ----- WhatsApp Webhook -----
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
-
     ip = request.client.host if request.client else "?"
     log.info(f"Webhook de {ip}: recebido")
 
-    # Parse payload (array ou objeto)
+    # Parse payload (array ou objeto) — aceita também body direto sem headers/params/query
     try:
-        if isinstance(payload, list):
-            env = EvoEnvelope.model_validate(payload[0])
+        item = payload[0] if isinstance(payload, list) else payload
+        if isinstance(item, dict) and item.get("body"):
+            obj = {
+                "headers": item.get("headers", {}),
+                "params": item.get("params", {}),
+                "query": item.get("query", {}),
+                "body": item.get("body", {}),
+                "webhookUrl": item.get("webhookUrl"),
+                "executionMode": item.get("executionMode"),
+            }
         else:
-            env = EvoEnvelope.model_validate(payload)
+            body = item if isinstance(item, dict) else {}
+            if "event" not in body and "data" in body:
+                body["event"] = "message.received"
+            obj = {"headers": {}, "params": {}, "query": {}, "body": body}
+        env = EvoEnvelope.model_validate(obj)
     except Exception as e:
         log.error(f"payload inválido: {e}")
         raise HTTPException(status_code=400, detail=f"payload inválido: {e}")
@@ -635,7 +678,7 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
                 f"MENSAGEM: {text}"
             ),
             agent=router,
-            expected_output="resposta curta e amigável"
+            expected_output="resposta curta, humana e com 1 pergunta"
         )
         c = Crew(agents=[router], tasks=[t], process=Process.sequential, verbose=False)
         await c.kickoff_async()
