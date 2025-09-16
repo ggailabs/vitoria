@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
 """
-Agente de Nutrição/Treinos — CrewAI + Redis + JSON + WhatsApp
-Corrigido para funcionar com OpenRouter via LiteLLM (usado internamente pelo CrewAI)
+Agente de Nutrição/Treinos — CrewAI + Redis (histórico) + JSON (dados) + WhatsApp
+---------------------------------------------------------------------------------
+Objetivo: demo fácil pra mostrar pelo WhatsApp (WABot x-api-key), com logs claros,
+Redis guardando **histórico de interação** e JSON como "banco de dados" de perfil/dados.
+✔ Webhook aceita o payload no formato que você enviou (array com headers/body/data)
+✔ Envia resposta via API do WABot (x-api-key): [https://wabot.ggailabs.com/whatsapp/message/sendText](https://wabot.ggailabs.com/whatsapp/message/sendText)
+✔ Endpoints REST também existem pra testar sem WhatsApp
+✔ Conversação natural e humana com IA
+✔ Usa modelo direto da variável de ambiente MODEL
+✔ Pronto pra EasyPanel (ver Dockerfile e requirements no final deste arquivo)
+
+Instalação local:
+  pip install fastapi uvicorn httpx python-dotenv redis "crewai>=0.60.0" pydantic<3
+  export OPENROUTER_API_KEY=sk-or-v1-...
+  export MODEL=z-ai/glm-4.5-air:free
+  export REDIS_URL=redis://localhost:6379/0
+  export WABOT_API_KEY=SEU_TOKEN
+  uvicorn wellness_agent_whatsapp_json_redis:app --host 0.0.0.0 --port 8000 --reload
 """
 from __future__ import annotations
 import os
@@ -37,7 +53,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 BRAND = os.getenv("BRAND", "Fitly.ai")
 
 # -------------------------
-# OpenRouter Configuration para LiteLLM
+# OpenRouter Configuration - CORRIGIDO PARA USAR DIRETAMENTE A VARIÁVEL MODEL
 # -------------------------
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
@@ -46,26 +62,15 @@ if not OPENROUTER_API_KEY:
 
 # Configurar variáveis que o LiteLLM espera para OpenRouter
 os.environ["OPENROUTER_API_KEY"] = OPENROUTER_API_KEY
-os.environ["OPENROUTER_API_BASE"] = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+os.environ["OPENROUTER_API_BASE"] = os.getenv("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
 
-# Modelos válidos para OpenRouter (escolha um que funcione)
-AVAILABLE_MODELS = {
-    "gpt-4o-mini": "openrouter/openai/gpt-4o-mini",
-    "claude-3-haiku": "openrouter/anthropic/claude-3-haiku-20240307", 
-    "llama-3.1-8b": "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    "llama-3.1-70b": "openrouter/meta-llama/llama-3.1-70b-instruct:free",
-    "qwen-2.5-72b": "openrouter/qwen/qwen-2.5-72b-instruct:free",
-    "mistral-7b": "openrouter/mistralai/mistral-7b-instruct:free"
-}
-
-# Usar modelo da variável de ambiente ou fallback
-MODEL_KEY = os.getenv("MODEL_KEY", "llama-3.1-8b")  # chave do dict acima
-MODEL = AVAILABLE_MODELS.get(MODEL_KEY, AVAILABLE_MODELS["llama-3.1-8b"])
+# USAR DIRETAMENTE A VARIÁVEL MODEL (SEM MAPEAMENTO)
+MODEL = os.getenv("MODEL", "z-ai/glm-4.5-air:free")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 
 log.info(f"✅ Modelo configurado: {MODEL}")
 
-# WhatsApp sender (WABot)
+# WhatsApp sender (WABot) - HTTPS
 WABOT_BASE = os.getenv("WABOT_BASE", "https://wabot.ggailabs.com")
 WABOT_SEND_PATH = "/whatsapp/message/sendText"
 WABOT_API_KEY = os.getenv("WABOT_API_KEY", "changeme")
@@ -144,12 +149,15 @@ def envelope_from_any(item: Dict[str, Any]) -> EvoEnvelope:
 # JSON DB helpers
 # -------------------------
 def digits(s: str) -> str:
+    """Extrai apenas dígitos de uma string"""
     return "".join(ch for ch in s if ch.isdigit())
 
 def user_path(user_id: str) -> Path:
+    """Retorna o caminho do arquivo JSON do usuário"""
     return DB_DIR / f"{digits(user_id)}.json"
 
 def load_user(user_id: str) -> Dict[str, Any]:
+    """Carrega dados do usuário do JSON"""
     p = user_path(user_id)
     if p.exists():
         try:
@@ -157,6 +165,7 @@ def load_user(user_id: str) -> Dict[str, Any]:
         except Exception as e:
             log.exception(f"Falha ao ler JSON do usuário {user_id}: {e}")
     
+    # Estrutura inicial
     return {
         "user_id": digits(user_id),
         "profile": {},
@@ -168,6 +177,7 @@ def load_user(user_id: str) -> Dict[str, Any]:
     }
 
 def save_user(user_id: str, data: Dict[str, Any]) -> None:
+    """Salva dados do usuário no JSON"""
     p = user_path(user_id)
     try:
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -177,9 +187,10 @@ def save_user(user_id: str, data: Dict[str, Any]) -> None:
         raise
 
 # -------------------------
-# Redis histórico
+# Redis histórico de interação
 # -------------------------
 def push_history(user_id: str, who: str, text: str) -> None:
+    """Adiciona mensagem ao histórico no Redis"""
     key = f"fit:history:{digits(user_id)}"
     item = json.dumps({
         "ts": datetime.utcnow().isoformat(), 
@@ -189,13 +200,13 @@ def push_history(user_id: str, who: str, text: str) -> None:
     
     try:
         r.lpush(key, item)
-        r.ltrim(key, 0, 499)
+        r.ltrim(key, 0, 499)  # mantém últimas 500 mensagens
         log.info(f"HIST [{key}] <= {who}: {text[:100]}...")
     except Exception as e:
         log.error(f"Erro ao salvar histórico: {e}")
 
 # -------------------------
-# Parsers de comandos
+# Parsers de comandos (WhatsApp)
 # -------------------------
 _kfloat = lambda s: float(str(s).replace(",", "."))
 
@@ -206,6 +217,7 @@ re_treino = re.compile(r"^\s*treino\s+(?P<tipo>\w+)\s+(?P<dur>\d+)\s*min(?:\s+(?
 re_perfil = re.compile(r"perfil\s+altura\s+(?P<alt>\d{3})\s+sexo\s+(?P<sex>\w+)\s+objetivo\s+(?P<goal>\w+)\s+atividade\s+(?P<act>\w+)", re.I)
 
 def parse_meal(text: str) -> Optional[Dict[str, Any]]:
+    """Parser para refeições: refeicao 650kcal 35p 75c 15g descrição"""
     try:
         kcal = re.search(r"(\d+)\s*kcal", text, re.I)
         prot = re.search(r"(\d+)\s*p", text, re.I)
@@ -238,7 +250,7 @@ def build_agents():
         role="Nutricionista IA",
         goal=f"Analisar ingestão e sugerir metas realistas de 7 dias no estilo {BRAND}.",
         backstory="Prática e clara; dá números que cabem no dia-a-dia.",
-        model=MODEL,  # Usar diretamente o modelo
+        model=MODEL,  # Usar diretamente o modelo da variável
         temperature=TEMPERATURE,
         allow_delegation=False, 
         verbose=False,
@@ -275,9 +287,9 @@ def build_agents():
     )
     
     router = Agent(
-        role="Roteador",
-        goal="Entender intenção e responder educadamente quando a mensagem não for um comando.",
-        backstory="Explica como usar e pode registrar dados simples.",
+        role="Coach Conversacional",
+        goal="Conversar naturalmente sobre saúde, fitness e bem-estar, sendo empático e engajador.",
+        backstory="Coach amigável que adapta linguagem ao usuário, faz perguntas relevantes e motiva de forma natural.",
         model=MODEL,
         temperature=TEMPERATURE,
         allow_delegation=False, 
@@ -287,6 +299,7 @@ def build_agents():
     return dietitian, trainer, habit, chef, router
 
 def build_coach_tasks(profile: Dict[str, Any], week: Dict[str, List[Dict[str, Any]]]):
+    """Constrói as tasks para análise completa"""
     ctx = json.dumps({"profile": profile, **week}, ensure_ascii=False)
     diet, trn, hab, chf, _ = build_agents()
     
@@ -331,6 +344,7 @@ def build_coach_tasks(profile: Dict[str, Any], week: Dict[str, List[Dict[str, An
     return [t1, t2, t3, t4]
 
 async def run_coach(profile: Dict[str, Any], week: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Executa análise completa com CrewAI"""
     try:
         log.info("🚀 Iniciando análise CrewAI...")
         tasks = build_coach_tasks(profile, week)
@@ -359,13 +373,13 @@ async def run_coach(profile: Dict[str, Any], week: Dict[str, List[Dict[str, Any]
         }
 
 # -------------------------
-# WhatsApp Sender
+# WhatsApp Sender - CORRIGIDO PARA "to"
 # -------------------------
 async def send_whatsapp(number: str, text: str) -> Dict[str, Any]:
     """Envia mensagem via WABot API"""
     url = f"{WABOT_BASE}{WABOT_SEND_PATH}"
     headers = {"Content-Type": "application/json", "x-api-key": WABOT_API_KEY}
-    payload = {"to": digits(number), "text": text}  # ← CORRIGIDO!
+    payload = {"to": digits(number), "text": text}  # ← CORRIGIDO: "to" em vez de "number"
     
     log.info(f"📱 Enviando WhatsApp → {payload['to']} | {text[:120]}...")
     
@@ -381,7 +395,6 @@ async def send_whatsapp(number: str, text: str) -> Dict[str, Any]:
         log.error(f"❌ Erro ao enviar WhatsApp: {e}")
         return {"status": "error", "message": str(e)}
 
-
 # -------------------------
 # FastAPI app
 # -------------------------
@@ -393,8 +406,6 @@ async def index():
         "ok": True,
         "service": "Wellness WhatsApp",
         "model": MODEL,
-        "available_models": list(AVAILABLE_MODELS.keys()),
-        "current_model_key": MODEL_KEY,
         "routes": ["/health", "/whatsapp/webhook (POST)", "/profile, /log/*, /summary/*, /agent/*", "/docs"]
     }
 
@@ -412,6 +423,7 @@ async def whatsapp_webhook_get():
 
 @app.get("/health")
 async def health():
+    """Health check com status do Redis e OpenRouter"""
     try:
         redis_ok = r.ping()
     except Exception:
@@ -422,7 +434,6 @@ async def health():
     return {
         "ok": True,
         "model": MODEL,
-        "model_key": MODEL_KEY,
         "brand": BRAND,
         "users": users,
         "redis": redis_ok,
@@ -502,7 +513,7 @@ async def coach(user_id: str, days: int = Query(7, ge=3, le=31)):
     return {"ok": True, "range": {"start": start}, "report": report}
 
 # -------------------------
-# WhatsApp Webhook
+# WhatsApp Webhook - CONVERSAÇÃO NATURAL
 # -------------------------
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
@@ -564,7 +575,7 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
             "activity": m.group("act"),
         })
         save_user(user_id, u)
-        reply = "✅ Perfil atualizado — mande 'coach' para análise!"
+        reply = "✅ Perfil atualizado! Agora posso dar dicas mais personalizadas. Quer fazer uma análise completa? Digite 'coach' 😊"
     
     # PESO
     if not reply:
@@ -573,7 +584,7 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
             item = {"date": datetime.utcnow().date().isoformat(), "kg": _kfloat(m.group(1))}
             u.setdefault("weights", []).insert(0, item)
             save_user(user_id, u)
-            reply = f"⚖️ Peso registrado: {item['kg']} kg"
+            reply = f"⚖️ Perfeito! Peso de {item['kg']} kg registrado. Como você está se sentindo hoje?"
     
     # ÁGUA
     if not reply:
@@ -582,7 +593,7 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
             item = {"date": datetime.utcnow().date().isoformat(), "liters": _kfloat(m.group(2))}
             u.setdefault("water", []).insert(0, item)
             save_user(user_id, u)
-            reply = f"💧 Água registrada: {item['liters']} L"
+            reply = f"💧 Ótimo! {item['liters']} L de água registrados. Hidratação é fundamental! 👏"
     
     # REFEIÇÃO
     if not reply and re_meal.search(text):
@@ -591,9 +602,9 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
             meal["date"] = datetime.utcnow().date().isoformat()
             u.setdefault("meals", []).insert(0, meal)
             save_user(user_id, u)
-            reply = f"🍽️ Refeição registrada: {meal['kcal']} kcal, {meal['protein_g']}P/{meal['carbs_g']}C/{meal['fat_g']}G"
+            reply = f"🍽️ Refeição registrada! {meal['kcal']} kcal com {meal['protein_g']}g de proteína. Que tal registrar a próxima também?"
         else:
-            reply = "❌ Formato: refeicao 650kcal 35p 75c 15g descrição"
+            reply = "❌ Não consegui entender o formato da refeição. Use: refeicao 650kcal 35p 75c 15g omelete com aveia"
     
     # TREINO
     if not reply:
@@ -609,10 +620,10 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
             }
             u.setdefault("workouts", []).insert(0, item)
             save_user(user_id, u)
-            reply = f"💪 Treino registrado: {item['type']} {item['duration_min']}min"
+            reply = f"💪 Parabéns pelo treino! {item['type'].title()} por {item['duration_min']} minutos. Como foi a intensidade?"
     
     # COACH
-    if not reply and re.search(r"\b(coach|análise|analise)\b", text, re.I):
+    if not reply and re.search(r"\b(coach|análise|analise|analisar)\b", text, re.I):
         profile = u.get("profile", {}) or {"goal": "maintain", "activity": "moderate"}
         data_week = {
             "weights": u.get("weights", [])[:20],
@@ -626,38 +637,75 @@ async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
         u["last_report"] = report
         save_user(user_id, u)
         
-        # Compacta resposta
+        # Compacta resposta para WhatsApp
         reply = (
-            "🤖 *Análise CrewAI pronta!*\n\n" +
-            "🎯 *Metas:*\n" + (report.get("task_1", "").strip()[:500]) + "\n\n" +
+            "🤖 *Sua análise personalizada está pronta!*\n\n" +
+            "🎯 *Nutrição:*\n" + (report.get("task_1", "").strip()[:450]) + "\n\n" +
             "💪 *Treinos:*\n" + (report.get("task_2", "").strip()[:400]) + "\n\n" +
             "🔄 *Hábitos:*\n" + (report.get("task_3", "").strip()[:350]) + "\n\n" +
-            "👨‍🍳 *Receitas:*\n" + (report.get("task_4", "").strip()[:350])
+            "👨‍🍳 *Receitas:*\n" + (report.get("task_4", "").strip()[:300])
         )
     
-    # HELP / Resposta simples
+    # CONVERSAÇÃO NATURAL COM IA
     if not reply:
-        if re.search(r"\b(help|ajuda|como|usar)\b", text, re.I):
-            reply = (
-                "🤖 *Como usar:*\n\n"
-                "📊 *Registrar dados:*\n"
-                "• peso 75.5\n"
-                "• agua 2.2\n"
-                "• refeicao 650kcal 35p 75c 15g omelete\n"
-                "• treino corrida 30min\n"
-                "• perfil altura 175 sexo male objetivo cut atividade moderate\n\n"
-                "🤖 *Análise:* coach\n\n"
-                "Digite qualquer comando para começar! 🚀"
+        try:
+            # Usar o agent router para conversas naturais
+            diet, trn, hab, chf, router = build_agents()
+            
+            # Context sobre o usuário
+            profile = u.get("profile", {})
+            recent_data = {
+                "peso_recente": u.get("weights", [{}])[0].get("kg") if u.get("weights") else None,
+                "refeicoes_hoje": len([m for m in u.get("meals", []) if m.get("date") == datetime.utcnow().date().isoformat()]),
+                "treinos_semana": len([w for w in u.get("workouts", []) if (datetime.utcnow().date() - datetime.fromisoformat(w.get("date", "1900-01-01"))).days <= 7])
+            }
+            
+            context = f"Usuário: {text}\nPerfil: {profile}\nDados recentes: {recent_data}"
+            
+            t = Task(
+                description=(
+                    "Você é um coach de saúde amigável e conversacional pelo WhatsApp.\n"
+                    "Responda de forma natural e humana. Se perguntarem como você funciona, explique que:\n"
+                    "- Ajuda com nutrição, treinos e hábitos saudáveis\n"
+                    "- Registra dados como peso, água, refeições e treinos\n"
+                    "- Faz análises personalizadas com 'coach'\n"
+                    "- Conversa naturalmente sobre saúde e bem-estar\n\n"
+                    "Seja empático, use emojis moderadamente e faça perguntas para engajar.\n"
+                    f"Contexto: {context}"
+                ),
+                agent=router,
+                expected_output="Resposta conversacional, natural e engajadora (máximo 200 caracteres)"
             )
-        else:
-            reply = (
-                f"👋 Olá! Sou seu coach de saúde.\n\n"
-                f"Digite *help* para ver comandos ou comece registrando:\n"
-                f"• peso 75.5\n"
-                f"• agua 2.2\n"
-                f"• coach (para análise)\n\n"
-                f"Como posso ajudar? 😊"
-            )
+            
+            c = Crew(agents=[router], tasks=[t], process=Process.sequential, verbose=False)
+            await c.kickoff_async()
+            
+            ai_response = getattr(t.output, 'raw', None) or str(t.output)
+            reply = ai_response.strip()
+            
+            # Fallback caso a IA falhe
+            if not reply or len(reply) < 10:
+                raise Exception("IA response too short")
+                
+        except Exception as e:
+            log.error(f"Erro na conversa IA: {e}")
+            # Fallback mais natural
+            if re.search(r"\b(help|ajuda|como|usar|funciona|faz)\b", text, re.I):
+                reply = (
+                    "Sou seu coach de saúde! 💪\n\n"
+                    "Posso ajudar você a:\n"
+                    "• Acompanhar peso e hidratação\n"
+                    "• Registrar refeições e treinos\n"
+                    "• Fazer análises personalizadas\n\n"
+                    "Experimente: peso 75 ou coach\n"
+                    "Como posso te ajudar hoje? 😊"
+                )
+            else:
+                reply = (
+                    "Oi! 👋 Sou especialista em saúde e fitness.\n\n"
+                    "Posso te ajudar com nutrição, treinos e hábitos saudáveis!\n\n"
+                    "Quer começar registrando seu peso atual ou tem alguma pergunta sobre saúde? 🤔"
+                )
     
     push_history(user_id, "coach", reply)
     await send_whatsapp(user_id, reply)
