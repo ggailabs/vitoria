@@ -51,7 +51,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import redis
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -507,7 +507,7 @@ async def last_report(user_id: str):
 
 # ----- WhatsApp Webhook -----
 @app.post("/whatsapp/webhook")
-async def whatsapp_webhook(payload: Any, request: Request):
+async def whatsapp_webhook(payload: dict | list = Body(...), request: Request):
     ip = request.client.host if request.client else "?"
     log.info(f"Webhook de {ip}: recebido")
 
