@@ -51,7 +51,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 import redis
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from crewai import Agent, Task, Crew, Process
@@ -329,6 +330,32 @@ async def send_whatsapp(number: str, text: str) -> Dict[str, Any]:
 # -------------------------
 app = FastAPI(title=f"{BRAND} — Wellness WhatsApp (CrewAI+Redis+JSON)")
 
+# Endpoints utilitários para reduzir 404/405 e facilitar testes
+@app.get("/")
+async def index():
+    return {
+        "ok": True,
+        "service": "Wellness WhatsApp",
+        "routes": [
+            "/health",
+            "/whatsapp/webhook (POST)",
+            "/profile, /log/*, /summary/*, /agent/*",
+            "/docs"
+        ]
+    }
+
+@app.head("/")
+async def index_head():
+    return Response(status_code=200)
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
+
+@app.get("/whatsapp/webhook")
+async def whatsapp_webhook_get():
+    return JSONResponse({"ok": True, "hint": "Use POST neste mesmo URL com payload message.received"}, status_code=200)
+
 @app.get("/health")
 async def health():
     ok = r.ping()
@@ -496,17 +523,22 @@ async def whatsapp_webhook(payload: Any, request: Request):
 
     hdr_evt = (env.headers or {}).get("x-webhook-event", "")
     body_evt = env.body.event
+    log.info(f"Webhook recebido: hdr_event={hdr_evt} body_event={body_evt}")
     if hdr_evt != "message.received" and body_evt != "message.received":
         return {"ignored": True, "reason": "not a message.received"}
 
     data = env.body.data
+    log.info(f"From Evolution: sender={data.sender} jid={data.jid} isGroup={data.isGroup} type={data.type}")
     if data.isGroup:
+        log.info(f"Ignorado: mensagem de grupo de {data.sender}")
         return {"ignored": True, "reason": "group message"}
     if data.type != "text" or not (data.text or "").strip():
+        log.info(f"Ignorado: tipo={data.type} vazio={not bool((data.text or '').strip())}")
         return {"ignored": True, "reason": "non-text or empty"}
 
     user_id = digits(data.sender or data.jid)
     text = (data.text or "").strip()
+    log.info(f"Normalizado: number={user_id} text={text!r}")
     push_history(user_id, "user", text)
 
     # Tenta interpretar comandos
