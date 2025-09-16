@@ -66,7 +66,7 @@ TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 log.info(f"✅ Modelo configurado: {MODEL}")
 
 # WhatsApp sender (WABot)
-WABOT_BASE = os.getenv("WABOT_BASE", "http://wabot.ggailabs.com")
+WABOT_BASE = os.getenv("WABOT_BASE", "https://wabot.ggailabs.com")
 WABOT_SEND_PATH = "/whatsapp/message/sendText"
 WABOT_API_KEY = os.getenv("WABOT_API_KEY", "changeme")
 
@@ -362,11 +362,12 @@ async def run_coach(profile: Dict[str, Any], week: Dict[str, List[Dict[str, Any]
 # WhatsApp Sender
 # -------------------------
 async def send_whatsapp(number: str, text: str) -> Dict[str, Any]:
+    """Envia mensagem via WABot API"""
     url = f"{WABOT_BASE}{WABOT_SEND_PATH}"
     headers = {"Content-Type": "application/json", "x-api-key": WABOT_API_KEY}
-    payload = {"number": digits(number), "text": text}
+    payload = {"to": digits(number), "text": text}  # ← CORRIGIDO!
     
-    log.info(f"📱 Enviando WhatsApp → {payload['number']} | {text[:120]}...")
+    log.info(f"📱 Enviando WhatsApp → {payload['to']} | {text[:120]}...")
     
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -379,6 +380,7 @@ async def send_whatsapp(number: str, text: str) -> Dict[str, Any]:
     except Exception as e:
         log.error(f"❌ Erro ao enviar WhatsApp: {e}")
         return {"status": "error", "message": str(e)}
+
 
 # -------------------------
 # FastAPI app
