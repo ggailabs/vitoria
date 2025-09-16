@@ -114,9 +114,6 @@ class EvoEnvelope(BaseModel):
     webhookUrl: Optional[str] = None
     executionMode: Optional[str] = None
 
-class EvoWebhook(BaseModel):
-    __root__: List[EvoEnvelope]
-
 # -------------------------
 # JSON DB helpers
 # -------------------------
@@ -490,9 +487,9 @@ async def whatsapp_webhook(payload: Any, request: Request):
     # Parse payload (array ou objeto)
     try:
         if isinstance(payload, list):
-            env = EvoWebhook.parse_obj({"__root__": payload}).__root__[0]
+            env = EvoEnvelope.model_validate(payload[0])
         else:
-            env = EvoEnvelope.parse_obj(payload)
+            env = EvoEnvelope.model_validate(payload)
     except Exception as e:
         log.error(f"payload inválido: {e}")
         raise HTTPException(status_code=400, detail=f"payload inválido: {e}")
