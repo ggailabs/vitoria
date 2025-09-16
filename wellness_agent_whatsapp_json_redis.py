@@ -507,7 +507,8 @@ async def last_report(user_id: str):
 
 # ----- WhatsApp Webhook -----
 @app.post("/whatsapp/webhook")
-async def whatsapp_webhook(payload: dict | list = Body(...), request: Request):
+async def whatsapp_webhook(request: Request, payload: dict | list = Body(...)):
+
     ip = request.client.host if request.client else "?"
     log.info(f"Webhook de {ip}: recebido")
 
